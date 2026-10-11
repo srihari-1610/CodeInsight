@@ -1,53 +1,79 @@
-"""Live-client logic tested against a stubbed SDK response (no network, no key)."""
+"""Gemini client tests using mocked responses."""
+
+import json
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
-from core.analyzer import AnalysisRequest, analyze
-from core.llm import AnalysisError, AnthropicClient
-from core.samples import SAMPLES
-from core.schemas import TOOL_NAME
+from core.llm import AnalysisError, GeminiClient
 
 
-class _Messages:
-    def __init__(self, response):
-        self.response, self.kwargs = response, None
-
-    def create(self, **kwargs):
-        self.kwargs = kwargs
-        return self.response
-
-
-def _client(response):
-    c = AnthropicClient(api_key="test-key", model="test-model")
-    c._client = SimpleNamespace(messages=_Messages(response))
-    return c
-
-
-def _req():
-    s = SAMPLES[0]
-    return AnalysisRequest(code=s["code"], language=s["language"])
-
-
-def test_forced_tool_use_is_parsed_and_request_shape_is_correct():
-    resp = SimpleNamespace(stop_reason="tool_use", content=[
-        SimpleNamespace(type="text", text="ignored"),
-        SimpleNamespace(type="tool_use", name=TOOL_NAME, input=SAMPLES[0]["demo"]),
-    ])
-    client = _client(resp)
-    result = analyze(_req(), client)
-    sent = client._client.messages.kwargs
-    assert sent["tool_choice"] == {"type": "tool", "name": TOOL_NAME}
-    assert "<code" in sent["messages"][0]["content"] and "  1: import sys" in sent["messages"][0]["content"]
-    assert result.mode == "live" and result.analysis.algorithm.startswith("One-pass")
+def _valid_analysis():
+    return {
+        "algorithm": "One-pass Algorithm",
+        "category": "Searching",
+        "tags": ["test"],
+        "summary": "Mock analysis result",
+        "line_blocks": [],
+        "complexity": {
+            "time": "O(n)",
+            "space": "O(1)",
+            "explanation": "Test explanation",
+        },
+        "optimizations": [],
+        "pitfalls": [],
+        "quality": {
+            "score": 90,
+            "label": "Good",
+            "explanation": "Test quality",
+        },
+    }
 
 
-def test_truncated_response_gives_friendly_error():
-    with pytest.raises(AnalysisError, match="cut off"):
-        analyze(_req(), _client(SimpleNamespace(stop_reason="max_tokens", content=[])))
+def test_gemini_response_is_parsed():
+    expected = _valid_analysis()
+
+    with patch("core.llm.genai.Client") as mock_client:
+        mock_instance = mock_client.return_value
+        mock_instance.models.generate_content.return_value = SimpleNamespace(
+            text=json.dumps(expected)
+        )
+
+        client = GeminiClient(api_key="test-key")
+        result = client.complete("Analyze sample code")
+
+        assert result == expected
+        mock_instance.models.generate_content.assert_called_once()
 
 
-def test_missing_tool_block_gives_friendly_error():
-    resp = SimpleNamespace(stop_reason="end_turn", content=[SimpleNamespace(type="text", text="hi")])
-    with pytest.raises(AnalysisError, match="no structured analysis"):
-        analyze(_req(), _client(resp))
+def test_empty_gemini_response_raises_friendly_error():
+    with patch("core.llm.genai.Client") as mock_client:
+        mock_client.return_value.models.generate_content.return_value = (
+            SimpleNamespace(text=None)
+        )
+
+        client = GeminiClient(api_key="test-key")
+
+        with pytest.raises(AnalysisError, match="empty response"):
+            client.complete("Analyze sample code")
+
+
+def test_invalid_json_raises_analysis_error():
+    with patch("core.llm.genai.Client") as mock_client:
+        mock_client.return_value.models.generate_content.return_value = (
+            SimpleNamespace(text="not valid JSON")
+        )
+
+        client = GeminiClient(api_key="test-key")
+
+        with pytest.raises(AnalysisError, match="Gemini analysis failed"):
+            client.complete("Analyze sample code")
+
+
+def test_missing_api_key_raises_error():
+    with patch("core.llm.settings") as mock_settings:
+        mock_settings.gemini_api_key = ""
+
+        with pytest.raises(AnalysisError, match="API key is missing"):
+            GeminiClient()

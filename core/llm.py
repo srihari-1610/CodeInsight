@@ -1,83 +1,155 @@
-"""LLM provider layer: Anthropic (live, forced tool use => structured JSON) and an offline Demo client."""
+"""Gemini Live Mode and built-in Demo Mode clients."""
+
 from __future__ import annotations
 
-import copy
-from typing import Protocol
+import json
+from typing import Any, Protocol
 
-from .samples import find_sample
-from .schemas import TOOL_NAME, TOOL_SCHEMA
+from google import genai
+from google.genai import types
+
+from core.config import settings
+from core.schemas import TOOL_SCHEMA
+from core.samples import SAMPLES
 
 
 class AnalysisError(Exception):
-    """User-presentable failure while producing an analysis."""
+    """Raised when code analysis fails."""
 
 
 class LLMClient(Protocol):
     model: str
     mode: str
 
-    def complete(self, request, system: str, user: str, max_tokens: int) -> dict: ...
+    def complete(
+        self,
+        request: Any,
+        system_prompt: str = "",
+        user_prompt: str | None = None,
+        max_tokens: int = 4096,
+    ) -> dict[str, Any]:
+        ...
 
 
-class AnthropicClient:
+class GeminiClient:
+    """Use Gemini to analyse submitted code."""
+
     mode = "live"
 
-    def __init__(self, api_key: str, model: str, timeout: float = 90.0):
-        try:
-            import anthropic
-        except ImportError as exc:  # pragma: no cover
-            raise AnalysisError("The 'anthropic' package is not installed. Run: pip install -r requirements.txt") from exc
-        self._sdk = anthropic
-        self.model = model
-        self._client = anthropic.Anthropic(api_key=api_key, timeout=timeout, max_retries=2)
+    def __init__(
+        self,
+        api_key: str | None = None,
+        model: str | None = None,
+        timeout: float | None = None,
+    ) -> None:
+        key = api_key or settings.gemini_api_key
 
-    def complete(self, request, system: str, user: str, max_tokens: int) -> dict:
-        sdk = self._sdk
-        try:
-            resp = self._client.messages.create(
-                model=self.model,
-                max_tokens=max_tokens,
-                system=system,
-                messages=[{"role": "user", "content": user}],
-                tools=[TOOL_SCHEMA],
-                tool_choice={"type": "tool", "name": TOOL_NAME},
+        if not key:
+            raise AnalysisError(
+                "Gemini API key is missing. Configure GEMINI_API_KEY in .env."
             )
-        except sdk.AuthenticationError as exc:
-            raise AnalysisError("The API key was rejected. Check ANTHROPIC_API_KEY.") from exc
-        except sdk.RateLimitError as exc:
-            raise AnalysisError("Rate limit reached. Wait a moment and try again.") from exc
-        except sdk.APIConnectionError as exc:
-            raise AnalysisError("Could not reach the Anthropic API. Check your internet connection.") from exc
-        except sdk.APIStatusError as exc:
-            raise AnalysisError(f"API error ({exc.status_code}): {exc.message}") from exc
 
-        if resp.stop_reason == "max_tokens":
-            raise AnalysisError("The response was cut off. Try 'Concise' detail or a shorter snippet.")
-        for block in resp.content:
-            if getattr(block, "type", "") == "tool_use" and block.name == TOOL_NAME:
-                return dict(block.input)
-        raise AnalysisError("The model returned no structured analysis. Please try again.")
+        self.model = model or settings.gemini_model
+        self.client = genai.Client(api_key=key)
+
+    def complete(
+        self,
+        request: Any,
+        system_prompt: str = "",
+        user_prompt: str | None = None,
+        max_tokens: int = 4096,
+    ) -> dict[str, Any]:
+        if user_prompt is None:
+            user_prompt = str(request)
+
+        try:
+            response = self.client.models.generate_content(
+                model=self.model,
+                contents=user_prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=system_prompt or None,
+                    response_mime_type="application/json",
+                    response_json_schema=TOOL_SCHEMA["input_schema"],
+                    temperature=0.2,
+                    max_output_tokens=max_tokens,
+                ),
+            )
+
+            if not response.text:
+                raise AnalysisError(
+                    "Gemini returned an empty response. Please try again."
+                )
+
+            result = json.loads(response.text)
+
+            if not isinstance(result, dict):
+                raise AnalysisError(
+                    "Gemini returned an unexpected response format."
+                )
+
+            return result
+
+        except AnalysisError:
+            raise
+        except Exception as exc:
+            raise AnalysisError(
+                f"Gemini analysis failed: {exc}"
+            ) from exc
 
 
 class DemoClient:
-    """Serves pre-written analyses for the built-in samples only (no network, no key)."""
+    """Provide pre-written analysis for built-in samples without an API key."""
 
     mode = "demo"
-    model = "demo-fixtures"
+    model = "built-in-demo"
 
-    def complete(self, request, system: str, user: str, max_tokens: int) -> dict:
-        sample = find_sample(request.code, request.language)
-        if sample is None:
-            raise AnalysisError(
-                "Demo mode only analyses the built-in samples (pick one under 'Try a sample'). "
-                "Switch to Live mode and add an API key to analyse your own code."
-            )
-        return copy.deepcopy(sample["demo"])
+    def complete(
+        self,
+        request: Any,
+        system_prompt: str = "",
+        user_prompt: str | None = None,
+        max_tokens: int = 4096,
+    ) -> dict[str, Any]:
+        code = (
+            request.code
+            if hasattr(request, "code")
+            else str(request)
+        )
+        code = code.replace("\r\n", "\n").strip()
+
+        for sample in SAMPLES:
+            sample_code = sample["code"].replace("\r\n", "\n").strip()
+
+            if code == sample_code:
+                result = sample.get("demo")
+
+                if not isinstance(result, dict):
+                    raise AnalysisError(
+                        "The built-in sample analysis is unavailable."
+                    )
+
+                return json.loads(json.dumps(result))
+
+        raise AnalysisError(
+            "Demo mode only analyses built-in sample code. "
+            "Select a built-in sample or configure a Gemini API key "
+            "to analyse custom code in Live Mode."
+        )
 
 
-def get_client(live: bool, api_key: str, model: str, timeout: float = 90.0) -> LLMClient:
+def get_client(
+    live: bool = True,
+    api_key: str | None = None,
+    model: str | None = None,
+    timeout: float | None = None,
+) -> LLMClient:
+    """Return the client for the selected application mode."""
+
     if not live:
         return DemoClient()
-    if not api_key:
-        raise AnalysisError("No API key found. Add one in the sidebar or switch to Demo mode.")
-    return AnthropicClient(api_key=api_key, model=model, timeout=timeout)
+
+    return GeminiClient(
+        api_key=api_key,
+        model=model,
+        timeout=timeout,
+    )

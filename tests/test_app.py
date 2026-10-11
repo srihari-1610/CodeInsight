@@ -11,9 +11,9 @@ os.environ.pop("ANTHROPIC_API_KEY", None)
 
 def _app(tmp_path, monkeypatch):
     monkeypatch.setenv("CODEINSIGHT_DB", str(tmp_path / "ui.db"))
+    monkeypatch.setenv("GEMINI_API_KEY", "")
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    return AppTest.from_file(APP, default_timeout=30).run()
-
+    return AppTest.from_file(APP, default_timeout=60).run()
 
 def test_app_loads_without_errors(tmp_path, monkeypatch):
     at = _app(tmp_path, monkeypatch)

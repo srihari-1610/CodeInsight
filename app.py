@@ -98,14 +98,14 @@ def render_sidebar(settings, store: HistoryStore) -> tuple[bool, str, str]:
     with st.sidebar:
         st.markdown("### ⚙️ Settings")
         mode = st.radio(
-            "Mode", ["Live (Claude API)", "Demo (built-in samples)"], index=0 if settings.api_key else 1,
+            "Mode", ["Live (Gemini API)", "Demo (built-in samples)"], index=0 if settings.api_key else 1,
             help="Demo mode serves pre-written analyses for the 3 samples - no key or internet needed.",
         )
         live = mode.startswith("Live")
         api_key, model = settings.api_key, settings.model
         if live:
             if not settings.api_key:
-                api_key = st.text_input("Anthropic API key", type="password", help="Kept in memory for this session only.")
+                api_key = st.text_input("Gemini API key", type="password", help="Kept in memory for this session only.")
             model = st.text_input("Model", value=settings.model)
         st.selectbox("Explanation level", list(AUDIENCE_GUIDE), key="audience", help="Who the explanation is written for.")
         st.selectbox("Detail", list(DETAIL_GUIDE), key="detail")
